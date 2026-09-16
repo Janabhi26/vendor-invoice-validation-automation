@@ -6,7 +6,7 @@ NUMBER_TOLERANCE = 0.01
 
 
 def normalize_text(value: Any) -> Optional[str]:
-    """Normalize text for comparison."""
+    """Normalize text for reliable comparison."""
 
     if value is None:
         return None
@@ -20,13 +20,18 @@ def normalize_text(value: Any) -> Optional[str]:
 
 
 def to_float(value: Any) -> Optional[float]:
-    """Convert a value to float when possible."""
+    """Convert a value to float."""
 
     if value is None:
         return None
 
     try:
-        return float(value)
+        return float(
+            str(value)
+            .replace("$", "")
+            .replace(",", "")
+            .strip()
+        )
     except (TypeError, ValueError):
         return None
 
@@ -38,11 +43,18 @@ def compare_text(
 ) -> Dict[str, Any]:
     """Compare two text values."""
 
-    invoice_text = normalize_text(invoice_value)
-    workbook_text = normalize_text(workbook_value)
+    invoice_normalized = normalize_text(
+        invoice_value
+    )
 
-    if invoice_text is None or workbook_text is None:
+    workbook_normalized = normalize_text(
+        workbook_value
+    )
 
+    if (
+        invoice_normalized is None
+        or workbook_normalized is None
+    ):
         return {
             "field": field,
             "invoice_value": invoice_value,
@@ -50,15 +62,17 @@ def compare_text(
             "status": "NOT_COMPARABLE",
         }
 
+    status = (
+        "MATCH"
+        if invoice_normalized == workbook_normalized
+        else "MISMATCH"
+    )
+
     return {
         "field": field,
         "invoice_value": invoice_value,
         "workbook_value": workbook_value,
-        "status": (
-            "MATCH"
-            if invoice_text == workbook_text
-            else "MISMATCH"
-        ),
+        "status": status,
     }
 
 
@@ -66,15 +80,21 @@ def compare_number(
     field: str,
     invoice_value: Any,
     workbook_value: Any,
-    tolerance: float = NUMBER_TOLERANCE,
 ) -> Dict[str, Any]:
     """Compare numeric values."""
 
-    invoice_number = to_float(invoice_value)
-    workbook_number = to_float(workbook_value)
+    invoice_number = to_float(
+        invoice_value
+    )
 
-    if invoice_number is None or workbook_number is None:
+    workbook_number = to_float(
+        workbook_value
+    )
 
+    if (
+        invoice_number is None
+        or workbook_number is None
+    ):
         return {
             "field": field,
             "invoice_value": invoice_value,
@@ -86,16 +106,18 @@ def compare_number(
         invoice_number - workbook_number
     )
 
+    status = (
+        "MATCH"
+        if difference <= NUMBER_TOLERANCE
+        else "MISMATCH"
+    )
+
     return {
         "field": field,
         "invoice_value": invoice_number,
         "workbook_value": workbook_number,
         "difference": round(difference, 2),
-        "status": (
-            "MATCH"
-            if difference <= tolerance
-            else "MISMATCH"
-        ),
+        "status": status,
     }
 
 
@@ -106,40 +128,73 @@ def compare_money(
 ) -> Dict[str, Any]:
     """Compare monetary values."""
 
-    return compare_number(
-        field,
-        invoice_value,
-        workbook_value,
-        MONEY_TOLERANCE,
+    invoice_amount = to_float(
+        invoice_value
     )
+
+    workbook_amount = to_float(
+        workbook_value
+    )
+
+    if (
+        invoice_amount is None
+        or workbook_amount is None
+    ):
+        return {
+            "field": field,
+            "invoice_value": invoice_value,
+            "workbook_value": workbook_value,
+            "status": "NOT_COMPARABLE",
+        }
+
+    difference = abs(
+        invoice_amount - workbook_amount
+    )
+
+    status = (
+        "MATCH"
+        if difference <= MONEY_TOLERANCE
+        else "MISMATCH"
+    )
+
+    return {
+        "field": field,
+        "invoice_value": invoice_amount,
+        "workbook_value": workbook_amount,
+        "difference": round(difference, 2),
+        "status": status,
+    }
 
 
 def get_invoice_quantity(
     invoice_data: Dict[str, Any],
 ) -> Optional[float]:
     """
-    Get the invoice quantity.
+    Get the total invoice quantity.
 
     Standard invoices use shipped_quantity.
+
     Commodity invoices use quantity.
+
+    If multiple line items exist, their quantities
+    are summed.
     """
 
     line_items = invoice_data.get(
         "line_items",
-        [],
+        []
     )
 
     quantities = []
 
     for item in line_items:
 
-        quantity = (
+        value = (
             item.get("shipped_quantity")
-            if item.get("shipped_quantity") is not None
-            else item.get("quantity")
+            or item.get("quantity")
         )
 
-        number = to_float(quantity)
+        number = to_float(value)
 
         if number is not None:
             quantities.append(number)
@@ -154,32 +209,32 @@ def get_invoice_unit_price(
     invoice_data: Dict[str, Any],
 ) -> Optional[float]:
     """
-    Get the invoice price.
+    Get the invoice unit price.
 
-    Standard invoices use unit_price.
-    Commodity invoices use sales_price.
+    If every line uses the same unit price,
+    return that price.
 
-    If all line items have the same price, that price
-    is returned. If they have different prices, the
-    value is left as not directly comparable.
+    If multiple different prices exist, return None
+    because one workbook Cost/M value cannot safely
+    represent multiple invoice prices.
     """
 
     line_items = invoice_data.get(
         "line_items",
-        [],
+        []
     )
 
     prices = []
 
     for item in line_items:
 
-        price = (
+        value = (
             item.get("unit_price")
-            if item.get("unit_price") is not None
-            else item.get("sales_price")
+            or item.get("sales_price")
+            or item.get("price")
         )
 
-        number = to_float(price)
+        number = to_float(value)
 
         if number is not None:
             prices.append(number)
@@ -191,7 +246,7 @@ def get_invoice_unit_price(
 
     if all(
         abs(price - first_price)
-        <= MONEY_TOLERANCE
+        <= NUMBER_TOLERANCE
         for price in prices
     ):
         return first_price
@@ -203,47 +258,45 @@ def get_invoice_product(
     invoice_data: Dict[str, Any],
 ) -> Optional[str]:
     """
-    Get a product description when there is exactly
-    one invoice line item.
+    Get the invoice product description.
+
+    A single workbook Product field can safely be
+    compared only when the invoice contains one
+    product line.
     """
 
     line_items = invoice_data.get(
         "line_items",
-        [],
+        []
     )
 
-    descriptions = [
-        item.get("description")
-        for item in line_items
-        if item.get("description")
-    ]
+    if len(line_items) != 1:
+        return None
 
-    if len(descriptions) == 1:
-        return descriptions[0]
-
-    return None
+    return line_items[0].get(
+        "description"
+    )
 
 
 def get_invoice_freight(
     invoice_data: Dict[str, Any],
 ) -> Optional[float]:
     """
-    Return an explicitly extracted freight value.
+    Get explicit freight extracted from the invoice.
 
-    The current parser does not yet expose a dedicated
-    freight field, so invoice_total is deliberately NOT
-    treated as freight here.
+    IMPORTANT:
+    invoice_total is NOT treated as freight.
     """
 
-    freight = invoice_data.get("freight")
-
-    return to_float(freight)
+    return to_float(
+        invoice_data.get("freight")
+    )
 
 
 def get_workbook_tracking(
     workbook_data: Dict[str, Any],
 ) -> Any:
-    """Support both Tracking Number and Tracing Number."""
+    """Get whichever tracking field exists."""
 
     return (
         workbook_data.get("tracking_number")
@@ -253,7 +306,7 @@ def get_workbook_tracking(
 
 def compare_invoice_to_workbook(
     invoice_data: Dict[str, Any],
-    workbook_result: Dict[str, Any],
+    workbook_result: Optional[Dict[str, Any]],
 ) -> Dict[str, Any]:
     """
     Compare extracted invoice data against a Nassau
@@ -261,18 +314,42 @@ def compare_invoice_to_workbook(
 
     The workbook_result should come from
     NassauWorkbookReader.find_po().
+
+    If the PO is not found, workbook_result will be None.
     """
+
+    # --------------------------------------------------------
+    # PO NOT FOUND
+    # --------------------------------------------------------
+
+    if workbook_result is None:
+
+        return {
+            "po_number": invoice_data.get(
+                "po_number"
+            ),
+            "invoice_number": invoice_data.get(
+                "invoice_number"
+            ),
+            "workbook_sheet": None,
+            "matched_by": None,
+            "overall_status": "PO NOT FOUND",
+            "match_count": 0,
+            "mismatch_count": 0,
+            "not_comparable_count": 0,
+            "comparisons": [],
+        }
 
     workbook_data = workbook_result.get(
         "data",
-        {},
+        {}
     )
 
     comparisons = []
 
-    # -------------------------------------------------
+    # --------------------------------------------------------
     # PO
-    # -------------------------------------------------
+    # --------------------------------------------------------
 
     comparisons.append(
         compare_text(
@@ -282,162 +359,106 @@ def compare_invoice_to_workbook(
         )
     )
 
-    # -------------------------------------------------
-    # Quantity
-    # -------------------------------------------------
+    # --------------------------------------------------------
+    # QTY
+    # --------------------------------------------------------
+
+    invoice_quantity = get_invoice_quantity(
+        invoice_data
+    )
 
     comparisons.append(
         compare_number(
             "QTY",
-            get_invoice_quantity(invoice_data),
+            invoice_quantity,
             workbook_data.get("qty"),
         )
     )
 
-    # -------------------------------------------------
+    # --------------------------------------------------------
     # Product
-    # -------------------------------------------------
+    # --------------------------------------------------------
 
     invoice_product = get_invoice_product(
         invoice_data
     )
 
-    workbook_product = workbook_data.get(
-        "product"
+    comparisons.append(
+        compare_text(
+            "Product",
+            invoice_product,
+            workbook_data.get("product"),
+        )
     )
 
-    if invoice_product is None:
-
-        comparisons.append(
-            {
-                "field": "Product",
-                "invoice_value": [
-                    item.get("description")
-                    for item in invoice_data.get(
-                        "line_items",
-                        []
-                    )
-                    if item.get("description")
-                ],
-                "workbook_value": workbook_product,
-                "status": "NOT_COMPARABLE",
-            }
-        )
-
-    else:
-
-        comparisons.append(
-            compare_text(
-                "Product",
-                invoice_product,
-                workbook_product,
-            )
-        )
-
-    # -------------------------------------------------
+    # --------------------------------------------------------
     # Cost/M
-    # -------------------------------------------------
+    # --------------------------------------------------------
+
+    invoice_unit_price = get_invoice_unit_price(
+        invoice_data
+    )
 
     comparisons.append(
         compare_money(
             "Cost/M",
-            get_invoice_unit_price(invoice_data),
+            invoice_unit_price,
             workbook_data.get("cost_per_m"),
         )
     )
 
-    # -------------------------------------------------
+    # --------------------------------------------------------
     # Tracking
-    # -------------------------------------------------
+    # --------------------------------------------------------
+
+    workbook_tracking = get_workbook_tracking(
+        workbook_data
+    )
+
+    invoice_tracking = (
+        invoice_data.get("tracking_number")
+        or invoice_data.get("tracking")
+    )
 
     comparisons.append(
         compare_text(
             "Tracking",
-            invoice_data.get(
-                "tracking_number"
-            ),
-            get_workbook_tracking(
-                workbook_data
-            ),
+            invoice_tracking,
+            workbook_tracking,
         )
     )
 
-    # -------------------------------------------------
+    # --------------------------------------------------------
     # Freight
-    #
-    # IMPORTANT:
-    # The current parser does not extract freight yet.
-    # Therefore we do NOT compare invoice_total to
-    # workbook Freight.
-    # -------------------------------------------------
+    # --------------------------------------------------------
 
     invoice_freight = get_invoice_freight(
         invoice_data
     )
 
-    if invoice_freight is None:
-
-        comparisons.append(
-            {
-                "field": "Freight",
-                "invoice_value": None,
-                "workbook_value": workbook_data.get(
-                    "freight"
-                ),
-                "status": "NOT_COMPARABLE",
-            }
+    comparisons.append(
+        compare_money(
+            "Freight",
+            invoice_freight,
+            workbook_data.get("freight"),
         )
-
-    else:
-
-        comparisons.append(
-            compare_money(
-                "Freight",
-                invoice_freight,
-                workbook_data.get(
-                    "freight"
-                ),
-            )
-        )
-
-    # -------------------------------------------------
-    # Carrier
-    #
-    # The current parser does not yet expose carrier.
-    # -------------------------------------------------
-
-    invoice_carrier = invoice_data.get(
-        "carrier"
     )
 
-    if invoice_carrier is None:
+    # --------------------------------------------------------
+    # Carrier
+    # --------------------------------------------------------
 
-        comparisons.append(
-            {
-                "field": "Carrier",
-                "invoice_value": None,
-                "workbook_value": workbook_data.get(
-                    "carrier"
-                ),
-                "status": "NOT_COMPARABLE",
-            }
+    comparisons.append(
+        compare_text(
+            "Carrier",
+            invoice_data.get("carrier"),
+            workbook_data.get("carrier"),
         )
+    )
 
-    else:
-
-        comparisons.append(
-            compare_text(
-                "Carrier",
-                invoice_carrier,
-                workbook_data.get(
-                    "carrier"
-                ),
-            )
-        )
-
-    # -------------------------------------------------
-    # Summary
-    # -------------------------------------------------
+    # --------------------------------------------------------
+    # Count results
+    # --------------------------------------------------------
 
     match_count = sum(
         item["status"] == "MATCH"
@@ -454,13 +475,16 @@ def compare_invoice_to_workbook(
         for item in comparisons
     )
 
-    # A comparison is a mismatch only when a field
-    # was actually comparable and failed.
-    overall_status = (
-        "MISMATCH"
-        if mismatch_count > 0
-        else "MATCH"
-    )
+    # --------------------------------------------------------
+    # Overall status
+    #
+    # NOT_COMPARABLE does not create a mismatch.
+    # --------------------------------------------------------
+
+    if mismatch_count > 0:
+        overall_status = "MISMATCH"
+    else:
+        overall_status = "MATCH"
 
     return {
         "po_number": invoice_data.get(
@@ -478,8 +502,12 @@ def compare_invoice_to_workbook(
         "overall_status": overall_status,
         "match_count": match_count,
         "mismatch_count": mismatch_count,
-        "not_comparable_count": (
-            not_comparable_count
-        ),
+        "not_comparable_count": not_comparable_count,
         "comparisons": comparisons,
     }
+
+
+if __name__ == "__main__":
+    print(
+        "workbook_comparator.py loaded successfully."
+    )
