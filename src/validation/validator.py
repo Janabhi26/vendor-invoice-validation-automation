@@ -1,3 +1,4 @@
+import csv
 import os
 import sys
 from decimal import Decimal, InvalidOperation
@@ -151,8 +152,6 @@ def calculate_expected_line_total(
 
     # --------------------------------------------------------
     # Normal per-unit pricing
-    #
-    # EA, PCS, FT, etc.
     # --------------------------------------------------------
 
     return quantity * unit_price
@@ -198,19 +197,11 @@ def validate_line_items(invoice):
         start=1
     ):
 
-        # ----------------------------------------------------
-        # Quantity
-        # ----------------------------------------------------
-
         quantity = parse_amount(
             item.get("quantity")
             or item.get("ordered_quantity")
             or item.get("shipped_quantity")
         )
-
-        # ----------------------------------------------------
-        # Unit price
-        # ----------------------------------------------------
 
         unit_price = parse_amount(
             item.get("sales_price")
@@ -218,19 +209,11 @@ def validate_line_items(invoice):
             or item.get("price")
         )
 
-        # ----------------------------------------------------
-        # Invoice line total
-        # ----------------------------------------------------
-
         line_total = parse_amount(
             item.get("line_total")
             or item.get("total")
             or item.get("extension")
         )
-
-        # ----------------------------------------------------
-        # Price unit
-        # ----------------------------------------------------
 
         price_unit = (
             item.get("price_unit")
@@ -238,11 +221,6 @@ def validate_line_items(invoice):
         )
 
         unit = item.get("unit")
-
-        # ----------------------------------------------------
-        # A line must have a total so it can contribute to
-        # the invoice total.
-        # ----------------------------------------------------
 
         if line_total is None:
 
@@ -253,21 +231,10 @@ def validate_line_items(invoice):
 
             continue
 
-        # Include the invoice's actual line total when
-        # calculating the overall invoice total.
         calculated_total += line_total
-
-        # ----------------------------------------------------
-        # Some invoice lines may not have enough information
-        # to independently calculate the line total.
-        # ----------------------------------------------------
 
         if quantity is None or unit_price is None:
             continue
-
-        # ----------------------------------------------------
-        # Calculate expected amount.
-        # ----------------------------------------------------
 
         expected_total = calculate_expected_line_total(
             quantity,
@@ -282,10 +249,6 @@ def validate_line_items(invoice):
         difference = abs(
             expected_total - line_total
         )
-
-        # ----------------------------------------------------
-        # Allow one cent rounding difference.
-        # ----------------------------------------------------
 
         if difference > Decimal("0.01"):
 
@@ -390,10 +353,6 @@ def validate_invoice(invoice):
         "errors": [],
     }
 
-    # --------------------------------------------------------
-    # Required fields
-    # --------------------------------------------------------
-
     missing_fields = validate_required_fields(
         invoice
     )
@@ -408,10 +367,6 @@ def validate_invoice(invoice):
             + ", ".join(missing_fields)
         )
 
-    # --------------------------------------------------------
-    # Line items
-    # --------------------------------------------------------
-
     line_result = validate_line_items(
         invoice
     )
@@ -424,10 +379,6 @@ def validate_invoice(invoice):
         result["errors"].extend(
             line_result["errors"]
         )
-
-    # --------------------------------------------------------
-    # Invoice total
-    # --------------------------------------------------------
 
     total_result = validate_invoice_total(
         invoice,
@@ -501,6 +452,196 @@ def validate_workbook(
         ),
         "comparison": comparison,
     }
+
+
+# ------------------------------------------------------------
+# CSV report helpers
+# ------------------------------------------------------------
+
+REPORT_COLUMNS = [
+    "Invoice Number",
+    "Invoice Date",
+    "Invoice Format",
+    "PO Number",
+    "Invoice Total",
+    "Invoice Validation",
+    "Workbook Sheet",
+    "Workbook Match",
+    "PO Match",
+    "Quantity Match",
+    "Product Match",
+    "Cost/M Match",
+    "Tracking Match",
+    "Freight Match",
+    "Carrier Match",
+    "Error Details",
+]
+
+
+def get_comparison_status(
+    comparison,
+    field
+):
+    """Return the comparison status for one workbook field."""
+
+    if not comparison:
+        return "NOT_COMPARABLE"
+
+    for item in comparison.get("comparisons", []):
+
+        if item.get("field") == field:
+            return item.get(
+                "status",
+                "UNKNOWN"
+            )
+
+    return "NOT_COMPARABLE"
+
+
+def get_error_details(result):
+    """Convert invoice validation errors into one CSV value."""
+
+    errors = result.get("errors", [])
+
+    if not errors:
+        return ""
+
+    return " | ".join(
+        str(error)
+        for error in errors
+    )
+
+
+def build_report_row(
+    invoice,
+    invoice_result,
+    workbook_result
+):
+    """Build one CSV report row."""
+
+    comparison = (
+        workbook_result.get("comparison")
+        if workbook_result
+        else None
+    )
+
+    workbook_sheet = ""
+
+    if comparison:
+        workbook_sheet = (
+            comparison.get("workbook_sheet")
+            or ""
+        )
+
+    return {
+        "Invoice Number": invoice.get(
+            "invoice_number",
+            ""
+        ),
+        "Invoice Date": invoice.get(
+            "invoice_date",
+            ""
+        ),
+        "Invoice Format": invoice.get(
+            "invoice_format",
+            ""
+        ),
+        "PO Number": invoice.get(
+            "po_number",
+            ""
+        ),
+        "Invoice Total": invoice.get(
+            "invoice_total",
+            ""
+        ),
+        "Invoice Validation": (
+            "PASS"
+            if invoice_result.get("passed")
+            else "FAIL"
+        ),
+        "Workbook Sheet": workbook_sheet,
+        "Workbook Match": (
+            workbook_result.get(
+                "status",
+                "UNKNOWN"
+            )
+            if workbook_result
+            else ""
+        ),
+        "PO Match": get_comparison_status(
+            comparison,
+            "PO"
+        ),
+        "Quantity Match": get_comparison_status(
+            comparison,
+            "QTY"
+        ),
+        "Product Match": get_comparison_status(
+            comparison,
+            "Product"
+        ),
+        "Cost/M Match": get_comparison_status(
+            comparison,
+            "Cost/M"
+        ),
+        "Tracking Match": get_comparison_status(
+            comparison,
+            "Tracking"
+        ),
+        "Freight Match": get_comparison_status(
+            comparison,
+            "Freight"
+        ),
+        "Carrier Match": get_comparison_status(
+            comparison,
+            "Carrier"
+        ),
+        "Error Details": get_error_details(
+            invoice_result
+        ),
+    }
+
+
+def write_validation_report(rows):
+    """
+    Write the final validation results to CSV.
+
+    Returns the report file path.
+    """
+
+    output_directory = os.path.join(
+        PROJECT_ROOT,
+        "data",
+        "output"
+    )
+
+    os.makedirs(
+        output_directory,
+        exist_ok=True
+    )
+
+    report_path = os.path.join(
+        output_directory,
+        "validation_report.csv"
+    )
+
+    with open(
+        report_path,
+        "w",
+        newline="",
+        encoding="utf-8"
+    ) as report_file:
+
+        writer = csv.DictWriter(
+            report_file,
+            fieldnames=REPORT_COLUMNS
+        )
+
+        writer.writeheader()
+
+        writer.writerows(rows)
+
+    return report_path
 
 
 # ------------------------------------------------------------
@@ -581,10 +722,6 @@ def print_invoice_result(
             print(
                 f"     • {error}"
             )
-
-    # --------------------------------------------------------
-    # Workbook validation
-    # --------------------------------------------------------
 
     if workbook_result is None:
         return
@@ -722,15 +859,13 @@ def main():
     workbook_not_found_count = 0
     workbook_mismatch_count = 0
 
+    report_rows = []
+
     results = []
 
     workbook_reader = NassauWorkbookReader()
 
     try:
-
-        # ----------------------------------------------------
-        # Process every invoice
-        # ----------------------------------------------------
 
         for filename in pdf_files:
 
@@ -745,21 +880,21 @@ def main():
                     file_path
                 )
 
-                # --------------------------------------------
-                # Existing invoice validation
-                # --------------------------------------------
-
                 result = validate_invoice(
                     invoice
                 )
 
-                # --------------------------------------------
-                # New workbook validation
-                # --------------------------------------------
-
                 workbook_result = validate_workbook(
                     invoice,
                     workbook_reader
+                )
+
+                report_rows.append(
+                    build_report_row(
+                        invoice,
+                        result,
+                        workbook_result
+                    )
                 )
 
                 results.append(
@@ -806,6 +941,17 @@ def main():
                     )
                 )
 
+                report_rows.append(
+                    {
+                        column: ""
+                        for column in REPORT_COLUMNS
+                    }
+                )
+
+                report_rows[-1]["Invoice Number"] = filename
+                report_rows[-1]["Invoice Validation"] = "ERROR"
+                report_rows[-1]["Error Details"] = str(error)
+
                 print()
                 print("=" * 64)
                 print(
@@ -820,6 +966,14 @@ def main():
     finally:
 
         workbook_reader.close()
+
+    # --------------------------------------------------------
+    # Write CSV report
+    # --------------------------------------------------------
+
+    report_path = write_validation_report(
+        report_rows
+    )
 
     # --------------------------------------------------------
     # Final summary
@@ -856,6 +1010,11 @@ def main():
 
     print(
         f"Workbook mismatches: {workbook_mismatch_count}"
+    )
+
+    print()
+    print(
+        f"📄 Validation report: {report_path}"
     )
 
     print()
