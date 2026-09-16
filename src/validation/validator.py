@@ -22,6 +22,11 @@ if EXTRACTION_PATH not in sys.path:
 
 from invoice_parser import parse_invoice
 
+from src.validation.workbook_reader import NassauWorkbookReader
+from src.validation.workbook_comparator import (
+    compare_invoice_to_workbook,
+)
+
 
 # ------------------------------------------------------------
 # Helpers
@@ -111,12 +116,9 @@ def calculate_expected_line_total(
         = 15 × 1,950 / 1,000
         = $29.25
 
-    EA pricing is calculated normally:
+    EA pricing is calculated normally.
 
-        1 EA × $219.18/EA
-        = $219.18
-
-    Commodity Cables invoices also use their extracted
+    Commodity Cables invoices use their extracted
     quantity and sales price directly.
     """
 
@@ -203,6 +205,7 @@ def validate_line_items(invoice):
         quantity = parse_amount(
             item.get("quantity")
             or item.get("ordered_quantity")
+            or item.get("shipped_quantity")
         )
 
         # ----------------------------------------------------
@@ -371,7 +374,12 @@ def validate_invoice_total(
 
 def validate_invoice(invoice):
     """
-    Run all validations against one invoice.
+    Run invoice-only validations.
+
+    IMPORTANT:
+    This function intentionally does NOT perform workbook
+    validation. Existing tests depend on this function
+    validating the invoice independently of workbook data.
     """
 
     result = {
@@ -439,15 +447,73 @@ def validate_invoice(invoice):
 
 
 # ------------------------------------------------------------
+# Workbook validation
+# ------------------------------------------------------------
+
+def validate_workbook(
+    invoice,
+    workbook_reader
+):
+    """
+    Compare one parsed invoice against the Nassau workbook.
+
+    Workbook validation is kept separate from invoice-only
+    validation so an invoice can still pass its own checks
+    when its PO is absent from the current workbook.
+    """
+
+    po_number = invoice.get("po_number")
+
+    if po_number is None or str(po_number).strip() == "":
+        return {
+            "status": "PO NOT FOUND",
+            "message": "Invoice does not contain a PO number.",
+            "comparison": None,
+        }
+
+    workbook_result = workbook_reader.find_po(
+        po_number
+    )
+
+    if workbook_result is None:
+        return {
+            "status": "PO NOT FOUND",
+            "message": (
+                f"PO {po_number} was not found "
+                f"in the Nassau workbook."
+            ),
+            "comparison": None,
+        }
+
+    comparison = compare_invoice_to_workbook(
+        invoice,
+        workbook_result
+    )
+
+    return {
+        "status": comparison.get(
+            "overall_status",
+            "UNKNOWN"
+        ),
+        "message": (
+            f"PO found in worksheet "
+            f"{workbook_result['sheet']}."
+        ),
+        "comparison": comparison,
+    }
+
+
+# ------------------------------------------------------------
 # Display helpers
 # ------------------------------------------------------------
 
 def print_invoice_result(
     filename,
     invoice,
-    result
+    result,
+    workbook_result=None
 ):
-    """Print validation results for one invoice."""
+    """Print invoice and workbook validation results."""
 
     print()
     print("=" * 64)
@@ -487,7 +553,7 @@ def print_invoice_result(
     )
 
     print()
-    print("VALIDATION")
+    print("INVOICE VALIDATION")
 
     if result["required_fields"]:
         print("  ✅ Required fields")
@@ -507,18 +573,95 @@ def print_invoice_result(
     print()
 
     if result["passed"]:
-
-        print("  ✅ PASS")
-
+        print("  ✅ INVOICE PASS")
     else:
-
-        print("  ❌ FAIL")
+        print("  ❌ INVOICE FAIL")
 
         for error in result["errors"]:
-
             print(
                 f"     • {error}"
             )
+
+    # --------------------------------------------------------
+    # Workbook validation
+    # --------------------------------------------------------
+
+    if workbook_result is None:
+        return
+
+    print()
+    print("WORKBOOK VALIDATION")
+
+    workbook_status = workbook_result["status"]
+
+    if workbook_status == "PO NOT FOUND":
+
+        print("  ⚠️ PO NOT FOUND")
+        print(
+            f"     • {workbook_result['message']}"
+        )
+
+        return
+
+    comparison = workbook_result.get(
+        "comparison"
+    )
+
+    if comparison is None:
+        print(
+            f"  ⚠️ {workbook_status}"
+        )
+        return
+
+    for comparison_item in comparison.get(
+        "comparisons",
+        []
+    ):
+
+        field = comparison_item.get(
+            "field",
+            "Unknown"
+        )
+
+        status = comparison_item.get(
+            "status",
+            "UNKNOWN"
+        )
+
+        invoice_value = comparison_item.get(
+            "invoice_value"
+        )
+
+        workbook_value = comparison_item.get(
+            "workbook_value"
+        )
+
+        if status == "MATCH":
+            symbol = "✅"
+
+        elif status == "MISMATCH":
+            symbol = "❌"
+
+        else:
+            symbol = "⚠️"
+
+        print(
+            f"  {symbol} {field}: {status}"
+        )
+
+        print(
+            f"     Invoice : {invoice_value}"
+        )
+
+        print(
+            f"     Workbook: {workbook_value}"
+        )
+
+    print()
+    print(
+        f"  Overall workbook status: "
+        f"{comparison.get('overall_status', 'UNKNOWN')}"
+    )
 
 
 # ------------------------------------------------------------
@@ -575,68 +718,108 @@ def main():
     passed_count = 0
     failed_count = 0
 
+    workbook_found_count = 0
+    workbook_not_found_count = 0
+    workbook_mismatch_count = 0
+
     results = []
 
-    # --------------------------------------------------------
-    # Process every invoice
-    # --------------------------------------------------------
+    workbook_reader = NassauWorkbookReader()
 
-    for filename in pdf_files:
+    try:
 
-        file_path = os.path.join(
-            invoice_directory,
-            filename
-        )
+        # ----------------------------------------------------
+        # Process every invoice
+        # ----------------------------------------------------
 
-        try:
+        for filename in pdf_files:
 
-            invoice = parse_invoice(
-                file_path
+            file_path = os.path.join(
+                invoice_directory,
+                filename
             )
 
-            result = validate_invoice(
-                invoice
-            )
+            try:
 
-            results.append(
-                (
-                    filename,
-                    result["passed"]
+                invoice = parse_invoice(
+                    file_path
                 )
-            )
 
-            if result["passed"]:
-                passed_count += 1
-            else:
+                # --------------------------------------------
+                # Existing invoice validation
+                # --------------------------------------------
+
+                result = validate_invoice(
+                    invoice
+                )
+
+                # --------------------------------------------
+                # New workbook validation
+                # --------------------------------------------
+
+                workbook_result = validate_workbook(
+                    invoice,
+                    workbook_reader
+                )
+
+                results.append(
+                    (
+                        filename,
+                        result["passed"],
+                        workbook_result["status"]
+                    )
+                )
+
+                if result["passed"]:
+                    passed_count += 1
+                else:
+                    failed_count += 1
+
+                if workbook_result["status"] == "PO NOT FOUND":
+
+                    workbook_not_found_count += 1
+
+                elif workbook_result["status"] == "MISMATCH":
+
+                    workbook_mismatch_count += 1
+
+                else:
+
+                    workbook_found_count += 1
+
+                print_invoice_result(
+                    filename,
+                    invoice,
+                    result,
+                    workbook_result
+                )
+
+            except Exception as error:
+
                 failed_count += 1
 
-            print_invoice_result(
-                filename,
-                invoice,
-                result
-            )
-
-        except Exception as error:
-
-            failed_count += 1
-
-            results.append(
-                (
-                    filename,
-                    False
+                results.append(
+                    (
+                        filename,
+                        False,
+                        "ERROR"
+                    )
                 )
-            )
 
-            print()
-            print("=" * 64)
-            print(
-                f"PROCESSING: {filename}"
-            )
-            print("=" * 64)
+                print()
+                print("=" * 64)
+                print(
+                    f"PROCESSING: {filename}"
+                )
+                print("=" * 64)
 
-            print(
-                f"❌ ERROR: {error}"
-            )
+                print(
+                    f"❌ ERROR: {error}"
+                )
+
+    finally:
+
+        workbook_reader.close()
 
     # --------------------------------------------------------
     # Final summary
@@ -661,18 +844,35 @@ def main():
     )
 
     print()
+    print("WORKBOOK SUMMARY")
+
+    print(
+        f"POs found      : {workbook_found_count}"
+    )
+
+    print(
+        f"POs not found  : {workbook_not_found_count}"
+    )
+
+    print(
+        f"Workbook mismatches: {workbook_mismatch_count}"
+    )
+
+    print()
     print("-" * 64)
 
-    for filename, passed in results:
+    for filename, passed, workbook_status in results:
 
-        status = (
+        invoice_status = (
             "✅ PASS"
             if passed
             else "❌ FAIL"
         )
 
         print(
-            f"{status}  {filename}"
+            f"{invoice_status}  "
+            f"{workbook_status:15}  "
+            f"{filename}"
         )
 
     print()
@@ -681,14 +881,14 @@ def main():
     if failed_count == 0:
 
         print(
-            "🎉 All invoices passed validation."
+            "🎉 All invoices passed invoice validation."
         )
 
     else:
 
         print(
             f"⚠️ {failed_count} "
-            f"invoice(s) need attention."
+            f"invoice(s) failed invoice validation."
         )
 
     print()
