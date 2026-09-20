@@ -28,6 +28,11 @@ from src.validation.workbook_comparator import (
     compare_invoice_to_workbook,
 )
 
+from src.email.email_client import (
+    build_validation_email,
+    send_validation_result,
+)
+
 
 # ------------------------------------------------------------
 # Helpers
@@ -863,7 +868,14 @@ def main():
 
     results = []
 
-    workbook_reader = NassauWorkbookReader()
+    workbook_path = os.environ.get(
+        "NASSAU_WORKBOOK",
+        os.path.join(PROJECT_ROOT, "data", "Nassau.xlsx")
+    )
+
+    workbook_reader = NassauWorkbookReader(
+        workbook_path=workbook_path
+    )
 
     try:
 
@@ -1048,6 +1060,43 @@ def main():
         print(
             f"⚠️ {failed_count} "
             f"invoice(s) failed invoice validation."
+        )
+
+    # --------------------------------------------------------
+    # Send validation result through local email function
+    # --------------------------------------------------------
+
+    email_subject, email_message = build_validation_email(
+        pdf_files=pdf_files,
+        passed_count=passed_count,
+        failed_count=failed_count,
+        workbook_found_count=workbook_found_count,
+        workbook_not_found_count=workbook_not_found_count,
+        workbook_mismatch_count=workbook_mismatch_count,
+        results=results,
+    )
+
+    email_result = send_validation_result(
+        subject=email_subject,
+        message=email_message,
+    )
+
+    print()
+    print("=" * 64)
+    print("EMAIL RESULT")
+    print("=" * 64)
+
+    print(
+        f"Success      : {email_result['success']}"
+    )
+
+    print(
+        f"Status code  : {email_result['status_code']}"
+    )
+
+    if email_result.get("response"):
+        print(
+            f"Response     : {email_result['response']}"
         )
 
     print()
