@@ -3,10 +3,10 @@ import urllib.error
 import urllib.request
 
 
-DEFAULT_FUNCTION_URL = "http://127.0.0.1:8000/"
+DEFAULT_FUNCTION_URL = "https://2kdaltrne4icci3laxlf44ybq0xyupu.lambda-url.us-east-2.on.aws/"
 
-SENDER_EMAIL = "jan.abhi007@gmail.com"
-RECIPIENT_EMAIL = "matiasl@nassaunationalcable.com"
+SENDER_EMAIL = "matiasl@nassaunationalcable.com"
+RECIPIENT_EMAIL = "jan.abhi007@gmail.com"
 
 
 def build_validation_email(
