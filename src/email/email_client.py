@@ -3,7 +3,7 @@ import urllib.error
 import urllib.request
 
 
-DEFAULT_FUNCTION_URL = "https://2kdaltrne4icci3laxlf44ybq0xyupu.lambda-url.us-east-2.on.aws/"
+DEFAULT_FUNCTION_URL = "https://2kdaltrne4iccix3laxlf44ybq0xyupu.lambda-url.us-east-2.on.aws/"
 
 SENDER_EMAIL = "matiasl@nassaunationalcable.com"
 RECIPIENT_EMAIL = "jan.abhi007@gmail.com"
